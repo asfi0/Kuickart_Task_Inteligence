@@ -1,219 +1,330 @@
-const API_BASE_URL = (import.meta.env.VITE_API_URL || 'https://kti-backend.onrender.com/api').replace(/\/$/, '');
+import { supabase } from './supabase'
 
-const ACCESS_TOKEN_KEY = 'kuickart_access_token';
-const REFRESH_TOKEN_KEY = 'kuickart_refresh_token';
+const ACCESS_TOKEN_KEY = 'kuickart_access_token'
+const REFRESH_TOKEN_KEY = 'kuickart_refresh_token'
 
-function buildUrl(path, query) {
-  const url = new URL(`${API_BASE_URL}${path}`);
-  if (query) {
-    Object.entries(query).forEach(([key, value]) => {
-      if (value === undefined || value === null || value === '') return;
-      url.searchParams.set(key, String(value));
-    });
-  }
-  return url.toString();
-}
-
-function readStoredToken(key) {
+function setTokensFromSession(session) {
   try {
-    return localStorage.getItem(key) || '';
-  } catch {
-    return '';
-  }
+    if (!session) return
+    localStorage.setItem(ACCESS_TOKEN_KEY, session.access_token || '')
+    localStorage.setItem(REFRESH_TOKEN_KEY, session.refresh_token || '')
+  } catch {}
 }
 
 export function getAccessToken() {
-  return readStoredToken(ACCESS_TOKEN_KEY);
+  try {
+    return localStorage.getItem(ACCESS_TOKEN_KEY) || ''
+  } catch {
+    return ''
+  }
 }
 
 export function getRefreshToken() {
-  return readStoredToken(REFRESH_TOKEN_KEY);
+  try {
+    return localStorage.getItem(REFRESH_TOKEN_KEY) || ''
+  } catch {
+    return ''
+  }
 }
 
 export function setTokens({ accessToken, refreshToken }) {
-  if (accessToken) {
-    localStorage.setItem(ACCESS_TOKEN_KEY, accessToken);
-  }
-  if (refreshToken) {
-    localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
-  }
+  try {
+    if (accessToken) localStorage.setItem(ACCESS_TOKEN_KEY, accessToken)
+    if (refreshToken) localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken)
+  } catch {}
 }
 
 export function clearTokens() {
-  localStorage.removeItem(ACCESS_TOKEN_KEY);
-  localStorage.removeItem(REFRESH_TOKEN_KEY);
+  try {
+    localStorage.removeItem(ACCESS_TOKEN_KEY)
+    localStorage.removeItem(REFRESH_TOKEN_KEY)
+  } catch {}
 }
-
-async function parseResponse(response) {
-  const raw = await response.text();
-  let data = null;
-
-  if (raw) {
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      data = raw;
-    }
-  }
-
-  if (!response.ok) {
-    const message =
-      (typeof data === 'object' && data?.message && Array.isArray(data.message)
-        ? data.message.join(', ')
-        : typeof data === 'object' && data?.message
-          ? data.message
-          : typeof data === 'string' && data
-            ? data
-            : `Request failed with status ${response.status}`);
-
-    const error = new Error(message);
-    error.status = response.status;
-    error.payload = data;
-    throw error;
-  }
-
-  return data;
-}
-
-let refreshPromise = null;
 
 export async function refreshSession() {
-  if (!getRefreshToken()) {
-    throw new Error('No refresh token available');
+  const { data, error } = await supabase.auth.refreshSession()
+  if (error) throw error
+  setTokensFromSession(data.session)
+  return {
+    accessToken: data.session?.access_token || '',
+    refreshToken: data.session?.refresh_token || '',
   }
-
-  if (!refreshPromise) {
-    refreshPromise = (async () => {
-      const response = await fetch(buildUrl('/auth/refresh'), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ refreshToken: getRefreshToken() }),
-      });
-
-      const data = await parseResponse(response);
-      setTokens(data);
-      return data;
-    })().finally(() => {
-      refreshPromise = null;
-    });
-  }
-
-  return refreshPromise;
 }
 
-export async function apiRequest(path, options = {}, { allowRefresh = true } = {}) {
-  const {
-    method = 'GET',
-    body,
-    headers = {},
-    query,
-    auth = true,
-  } = options;
+async function getMyProfile() {
+  const { data: authData, error: authError } = await supabase.auth.getUser()
+  if (authError) throw authError
+  const user = authData.user
+  if (!user) return null
 
-  const requestHeaders = {
-    Accept: 'application/json',
-    ...headers,
-  };
+  const { data, error } = await supabase
+    .from('profiles')
+    .select(`
+      id,
+      email,
+      full_name,
+      is_active,
+      country:countries(id, name, code),
+      role:operational_roles(id, name, division:divisions(id, name))
+    `)
+    .eq('id', user.id)
+    .single()
 
-  if (body !== undefined && !requestHeaders['Content-Type']) {
-    requestHeaders['Content-Type'] = 'application/json';
+  if (error) throw error
+
+  return {
+    id: data.id,
+    email: data.email,
+    name: data.full_name,
+    isActive: data.is_active,
+    country: data.country,
+    role: data.role?.name || null,
+    roleRecord: data.role,
   }
-
-  if (auth) {
-    const accessToken = getAccessToken();
-    if (accessToken) {
-      requestHeaders.Authorization = `Bearer ${accessToken}`;
-    }
-  }
-
-  const response = await fetch(buildUrl(path, query), {
-    method,
-    headers: requestHeaders,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-
-  if (response.status === 401 && auth && allowRefresh && getRefreshToken() && path !== '/auth/refresh') {
-    try {
-      await refreshSession();
-      return apiRequest(path, options, { allowRefresh: false });
-    } catch {
-      clearTokens();
-    }
-  }
-
-  return parseResponse(response);
 }
 
 export const authApi = {
-  login(payload) {
-    return apiRequest('/auth/login', {
-      method: 'POST',
-      body: payload,
-      auth: false,
-    }, { allowRefresh: false });
+  async login(payload) {
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: payload.email,
+      password: payload.password,
+    })
+    if (error) throw error
+
+    setTokensFromSession(data.session)
+    const user = await getMyProfile()
+
+    return {
+      accessToken: data.session?.access_token || '',
+      refreshToken: data.session?.refresh_token || '',
+      user,
+    }
   },
-  me() {
-    return apiRequest('/auth/me');
+
+  async me() {
+    return getMyProfile()
   },
-  logout(payload) {
-    return apiRequest('/auth/logout', {
-      method: 'POST',
-      body: payload,
-    }, { allowRefresh: false });
+
+  async logout() {
+    const { error } = await supabase.auth.signOut()
+    clearTokens()
+    if (error) throw error
+    return { success: true }
   },
-};
+}
 
 export const coreApi = {
-  getUsers(query) {
-    return apiRequest('/users', { query });
-  },
-  getTasks(query) {
-    return apiRequest('/tasks', { query });
-  },
-  createTask(payload) {
-    return apiRequest('/tasks', { method: 'POST', body: payload });
-  },
-  startTask(taskId) {
-    return apiRequest(`/tasks/${taskId}/start`, { method: 'PATCH' });
-  },
-  submitTask(taskId) {
-    return apiRequest(`/tasks/${taskId}/submit`, { method: 'POST' });
-  },
-  approveTask(taskId) {
-    return apiRequest(`/tasks/${taskId}/approve`, { method: 'POST' });
-  },
-  rejectTask(taskId, reason) {
-    return apiRequest(`/tasks/${taskId}/reject`, { method: 'POST', body: { reason } });
-  },
-  getRoles(query) {
-    return apiRequest('/roles', { query });
-  },
-  getSubUnits(query) {
-    return apiRequest('/subunits', { query });
-  },
-  getTaskTemplates(query) {
-    return apiRequest('/task-templates', { query });
-  },
-  getKpi(query) {
-    return apiRequest('/kpi', { query });
-  },
-  getAlerts(query) {
-    return apiRequest('/alerts', { query });
-  },
-  getReports(query) {
-    return apiRequest('/reports', { query });
-  },
-  getActivityLogs(query) {
-    return apiRequest('/activity-logs', { query });
-  },
-  getCountries(query) {
-    return apiRequest('/countries', { query });
-  },
-  getDivisions(query) {
-    return apiRequest('/divisions', { query });
-  },
-};
+  async getUsers() {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select(`
+        id,
+        email,
+        full_name,
+        is_active,
+        country:countries(id, name, code),
+        role:operational_roles(id, name, division:divisions(id, name))
+      `)
+      .order('created_at', { ascending: false })
 
-export { API_BASE_URL };
+    if (error) throw error
+    return data || []
+  },
+
+  async getCountries() {
+    const { data, error } = await supabase
+      .from('countries')
+      .select('*')
+      .order('name')
+    if (error) throw error
+    return data || []
+  },
+
+  async getDivisions() {
+    const { data, error } = await supabase
+      .from('divisions')
+      .select('*')
+      .order('name')
+    if (error) throw error
+    return data || []
+  },
+
+  async getRoles() {
+    const { data, error } = await supabase
+      .from('operational_roles')
+      .select(`
+        id,
+        name,
+        division:divisions(id, name)
+      `)
+      .order('name')
+    if (error) throw error
+    return data || []
+  },
+
+  async getSubUnits(query = {}) {
+    let req = supabase
+      .from('subunits')
+      .select('*')
+      .order('name')
+
+    if (query.roleId) req = req.eq('role_id', query.roleId)
+
+    const { data, error } = await req
+    if (error) throw error
+    return data || []
+  },
+
+  async getTaskTemplates(query = {}) {
+    let req = supabase
+      .from('task_templates')
+      .select('*')
+      .order('name')
+
+    if (query.roleId) req = req.eq('role_id', query.roleId)
+    if (query.subUnitId) req = req.eq('subunit_id', query.subUnitId)
+
+    const { data, error } = await req
+    if (error) throw error
+    return data || []
+  },
+
+  async getTasks() {
+    const { data, error } = await supabase
+      .from('tasks')
+      .select(`
+        *,
+        country:countries(id, name, code),
+        division:divisions(id, name),
+        role:operational_roles(id, name),
+        subunit:subunits(id, name),
+        template:task_templates(id, name, description, default_priority),
+        assignedUser:profiles!tasks_assigned_user_id_fkey(id, email, full_name),
+        createdBy:profiles!tasks_created_by_fkey(id, email, full_name)
+      `)
+      .order('created_at', { ascending: false })
+
+    if (error) throw error
+    return data || []
+  },
+
+  async createTask(payload) {
+    const { data, error } = await supabase
+      .from('tasks')
+      .insert({
+        task_template_id: payload.taskTemplateId,
+        assigned_user_id: payload.assignedUserId,
+        custom_instructions: payload.customInstructions || null,
+        initial_notes: payload.initialNotes || null,
+        priority: payload.priority || null,
+        due_date: payload.dueDate || null,
+        title: payload.title || null,
+        description: payload.description || null,
+      })
+      .select()
+      .single()
+
+    if (error) throw error
+    return data
+  },
+
+  async startTask(taskId) {
+    const { data, error } = await supabase.rpc('start_task', { p_task_id: taskId })
+    if (error) throw error
+    return data
+  },
+
+  async submitTask(taskId) {
+    const { data, error } = await supabase.rpc('submit_task', { p_task_id: taskId })
+    if (error) throw error
+    return data
+  },
+
+  async approveTask(taskId) {
+    const { data, error } = await supabase.rpc('approve_task', { p_task_id: taskId })
+    if (error) throw error
+    return data
+  },
+
+  async rejectTask(taskId, reason) {
+    const { data, error } = await supabase.rpc('reject_task', {
+      p_task_id: taskId,
+      p_reason: reason,
+    })
+    if (error) throw error
+    return data
+  },
+
+  async getKpi(query = {}) {
+    const { data, error } = await supabase.rpc('get_kpi', {
+      p_country_id: query.countryId || null,
+      p_division_id: query.divisionId || null,
+      p_date_from: query.dateFrom || null,
+      p_date_to: query.dateTo || null,
+    })
+    if (error) throw error
+    return data
+  },
+
+  async getAlerts() {
+    const { data, error } = await supabase
+      .from('alerts')
+      .select(`
+        *,
+        division:divisions(id, name),
+        country:countries(id, name, code),
+        createdBy:profiles(id, email, full_name)
+      `)
+      .order('created_at', { ascending: false })
+
+    if (error) throw error
+    return data || []
+  },
+
+  async getReports(query = {}) {
+    let req = supabase
+      .from('reports')
+      .select(`
+        *,
+        division:divisions(id, name),
+        country:countries(id, name, code),
+        createdBy:profiles(id, email, full_name)
+      `)
+      .order('created_at', { ascending: false })
+
+    if (query.countryId) req = req.eq('country_id', query.countryId)
+    if (query.divisionId) req = req.eq('division_id', query.divisionId)
+    if (query.dateFrom) req = req.gte('created_at', query.dateFrom)
+    if (query.dateTo) req = req.lte('created_at', query.dateTo)
+
+    const { data, error } = await req
+    if (error) throw error
+    return data || []
+  },
+
+  async getReportSummary(query = {}) {
+    const { data, error } = await supabase.rpc('get_reports_summary', {
+      p_country_id: query.countryId || null,
+      p_division_id: query.divisionId || null,
+      p_date_from: query.dateFrom || null,
+      p_date_to: query.dateTo || null,
+    })
+    if (error) throw error
+    return data
+  },
+
+  async getActivityLogs() {
+    const { data, error } = await supabase
+      .from('activity_logs')
+      .select(`
+        *,
+        actor:profiles(id, email, full_name)
+      `)
+      .order('created_at', { ascending: false })
+
+    if (error) throw error
+    return data || []
+  },
+}
+
+export const API_BASE_URL = 'supabase'
