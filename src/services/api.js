@@ -1,4 +1,4 @@
-import { supabase } from './supabase'
+import { supabase } from '../supabase.js'
 
 const ACCESS_TOKEN_KEY = 'kuickart_access_token'
 const REFRESH_TOKEN_KEY = 'kuickart_refresh_token'
