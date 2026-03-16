@@ -1,4 +1,4 @@
-const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://localhost:3001/api').replace(/\/$/, '');
+const API_BASE_URL = (import.meta.env.VITE_API_URL || 'https://kti-backend.onrender.com/api').replace(/\/$/, '');
 
 const ACCESS_TOKEN_KEY = 'kuickart_access_token';
 const REFRESH_TOKEN_KEY = 'kuickart_refresh_token';
